@@ -1,0 +1,1052 @@
+---
+title: "R Notebook"
+output:
+  html_notebook:
+    toc: true
+  html_document:
+    toc: true
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+  markdown:
+    wrap: sentence
+---
+
+
+```{r Packages & data, message=FALSE, warning=FALSE, include=FALSE}
+dynamic_require <- function(package){
+  if(eval(parse(text=paste("require(",package,")")))) return(TRUE)
+  
+  install.packages(package)
+  return(eval(parse(text=paste("require(",package,")"))))
+}
+dynamic_require("ggpubr")
+dynamic_require("gtsummary")
+dynamic_require("tidyr")
+dynamic_require("xlsx")
+dynamic_require("ggplot2")
+dynamic_require("patchwork")
+dynamic_require("dplyr")
+dynamic_require("outliers")
+dynamic_require("EnvStats")
+dynamic_require("ggVennDiagram")
+dynamic_require("ggstatsplot")
+dynamic_require("PMCMRplus")
+dynamic_require("tableone")
+dynamic_require("mclust")
+dynamic_require("ggsurvfit")
+dynamic_require("survival")
+dynamic_require("kml")
+dynamic_require("kml3d")
+dynamic_require("knitr")
+dynamic_require("RMySQL")
+dynamic_require("factoextra")
+dynamic_require("stringr")
+dynamic_require("datawizard")
+dynamic_require("ggstatsplot")
+dynamic_require("sjPlot")
+dynamic_require("gridExtra")
+dynamic_require("survminer")
+dynamic_require("pastecs")
+dynamic_require("geomtextpath")
+dynamic_require("correlation")
+dynamic_require("caret")
+dynamic_require("MLeval")
+dynamic_require("clustvarsel")
+dynamic_require("ggstream")
+dynamic_require("plotly")
+
+ palette_tricolor <- c("#fee0d2","#fc9272", "#de2d26")
+palette_4_color <- c("#9efaa4","#dfc96b","#f0ae6d","#f5957d")
+palette_5_color <- c("#9efaa4","#c3e37e","#dfc96b","#f0ae6d","#f5957d")
+```
+
+```{r Load data & formatting, echo=TRUE, message=FALSE, warning=FALSE}
+baki_raw <- read.delim("original_data/own_data.csv", sep = ",") #as generated with SQL_v3.R
+colnames(baki_raw)[which(colnames(baki_raw)=="day")] <- "Days"
+colnames(baki_raw)[which(colnames(baki_raw)=="total_sofa")] <- "Sofa_score"
+baki_raw <- baki_raw %>%
+  filter(Study!="BAKI-A") %>%
+  select(-cytokines_e) %>%
+  mutate(temp_id = paste0(StudyID,"_",Days))
+
+
+#adding chitinase values
+baki_ruth <- read.delim("original_data/ruth_data.csv",sep=",")
+chitinase <- baki_ruth %>%
+  select(c(StudyID,Days,chitinase_value,u_chitinase_value)) %>%
+  mutate(temp_id = paste0(StudyID,"_",Days)) %>%
+  select(-c(StudyID,Days))
+baki_raw <- merge(baki_raw,chitinase,by="temp_id",all.x=T)
+
+
+#Adding comorbidities
+baki_jorien <- read.delim("original_data/jorien_data.csv",sep=";")
+comorb_jorien <- baki_jorien %>%
+  select(c(patient,cor_art_disease,diab_mell,mech_vent_d1,cortico_home,nsaid_home))
+comorb_jorien <- comorb_jorien %>%
+  mutate(patient = paste0("I/",str_sub(patient,start=2)))
+colnames(comorb_jorien)[1] <- "StudyID"
+baki_raw <- merge(baki_raw, comorb_jorien, by="StudyID")
+baki_raw$cor_art_disease <- as.factor(baki_raw$cor_art_disease)
+baki_raw$diab_mell <- as.factor(baki_raw$diab_mell)
+baki_raw$mech_vent_d1 <- as.factor(baki_raw$mech_vent_d1)
+
+#adding MDA/SCI values
+baki_samya <- read.delim("original_data/samya_data.csv",sep=";")
+baki_samya <- baki_samya %>%
+  select(c(StudyID,Days,MDA,SCI)) %>%
+  mutate(temp_id = paste0(StudyID,"_",Days)) %>%
+  select(-c(StudyID,Days))
+baki_raw <- merge(baki_raw,baki_samya,by="temp_id",all.x=T)
+baki_raw <- select(baki_raw,-temp_id)
+
+baki_raw$HospitalAdmissionTime <- as.POSIXct(baki_raw$HospitalAdmissionTime, "GMT")
+baki_raw$ICUAdmissionTime <- as.POSIXct(baki_raw$ICUAdmissionTime,"GMT")
+baki_raw$ICUDischargeTime <- as.POSIXct(baki_raw$ICUDischargeTime,"GMT")
+baki_raw$HospitalDischargeTime <- as.POSIXct(baki_raw$HospitalDischargeTime,"GMT")
+baki_raw$HospitalAdmissionDate <- as.POSIXct(baki_raw$HospitalAdmissionTime, "GMT")
+baki_raw$ICUAdmissionDate <- trunc(baki_raw$ICUAdmissionTime,"days")
+baki_raw$ICUDischargeDate <- trunc(baki_raw$ICUDischargeTime,"days")
+baki_raw$HospitalDischargeDate <- trunc(baki_raw$HospitalDischargeTime,"days")
+baki_raw$sepsis <- factor(baki_raw$sepsis, levels=c("no_sepsis","sepsis","septic_shock"), ordered=T)
+baki_raw$AKI <- factor(baki_raw$AKI, levels=c("No AKI","AKI Stage 1","AKI Stage 2","AKI Stage 3"), labels = c("No_AKI","AKI Stage 1","AKI Stage 2","AKI Stage 3"), ordered=T)
+
+
+#censoring = 1 if died
+#if alive or dead, take latest date we have
+baki_raw <- baki_raw %>%
+  mutate(discharge = pmax(HospitalDischargeDate, ICUDischargeDate))
+baki_raw$interval <- baki_raw$discharge-baki_raw$ICUAdmissionDate
+baki_raw$ICU_interval <- baki_raw$ICUDischargeDate-baki_raw$ICUAdmissionDate
+
+baki_raw$BMI <- as.numeric(baki_raw$BMI)
+baki_raw$Length <- as.numeric(baki_raw$Length)
+baki_raw$Gender <- as.factor(baki_raw$Gender)
+
+data_orig <- baki_raw
+
+biomarkers <- colnames(data_orig)[grepl("^cytokines_",colnames(data_orig))]
+biomarkers <- append(biomarkers,c("gdf15_value","MDA","SCI","u_chitinase_value","chitinase_value"))
+
+biomarker_names <- c("IL6","IL1β","TNF","IL18","IL10","IL1ɑ","IL1ra","GDF15","MDA","$Fe[c]", "urinary chitinase","chitinase")
+
+data_orig$died_within_15d <- ifelse(data_orig$Survival == 0 & data_orig$interval <= 15, 1, 0 )
+data_orig$died_within_30d <- ifelse(data_orig$Survival == 0 & data_orig$interval <= 30, 1, 0 )
+data_orig$died_within_90d <- ifelse(data_orig$Survival == 0 & data_orig$interval <= 90, 1, 0 )
+
+
+data_orig$censoring_30d <- ifelse(data_orig$died_within_30d == 1, 1, 0) #censored if survived, event otherwise
+data_orig$censoring <- ifelse(data_orig$Survival == 0, 1, 0) #censored if survived, event otherwise
+data_orig$interval_ceil30 <- ifelse(data_orig$interval > 30, 30, data_orig$interval)
+
+data_unique <- filter(data_orig, Days==1)
+data_day1 <- data_unique
+
+data_orig <- data_orig %>%
+  group_by(PatientID) %>%
+  arrange(as.numeric(substring(StudyID,3)), as.numeric(Days))
+
+data <- data_orig %>%
+  group_by(PatientID) %>%
+  summarise(Age=first(Age),
+            StudyID = first(StudyID),
+            BMI = first(BMI),
+            censoring = first(censoring),
+            censoring_30d = first(censoring_30d),
+            interval=first(interval),
+            interval_ceil30=first(interval_ceil30),
+            admission = first(ICUAdmissionDate),
+            ICUDischargeDate = first(ICUDischargeDate),
+            HospitalDischargeDate = first(HospitalDischargeDate),
+            Gender = first(Gender),
+            SOFA_max = max(Sofa_score,na.rm=T),
+            SOFA_d1 = first(Sofa_score, na.rm=T),
+            sepsis_max = max(sepsis, na.rm=T),
+            sepsis_d1 = first(sepsis, na.rm=T),
+            AKI_max = max(AKI, na.rm=T),
+            AKI_d1 = first(AKI, na.rm=T),
+            diab_mell = first(diab_mell),
+            cor_art_disease = first(cor_art_disease),
+            mech_vent_d1 = first(mech_vent_d1),
+            cortico_home = first(cortico_home),
+            nsaid_home = first(nsaid_home),
+            LDH_d1 = log2(first(LDH_max, na.rm=T)+1),
+            
+            across(all_of(biomarkers), \(x) log2(first(x, na.rm=T)+1), .names = "{.col}_d1"))
+
+data <- data %>%
+  mutate(discharge = pmax(HospitalDischargeDate, ICUDischargeDate))
+data$survival_30d <- ifelse(data$censoring == 1 & data$interval <= 30, 0, 1 )#1 if survived
+data$survival_15d <- ifelse(data$censoring == 1 & data$interval <= 15, 0, 1 )#1 if survived
+data$survival_30d <- factor(data$survival_30d, levels=c(0,1), labels=c("Deceased","Survived"))
+
+data$survival_15d <- factor(data$survival_15d, levels=c(0,1), labels=c("Deceased","Survived"))
+max_d17 <- data_orig %>%
+  filter(Days < 8 & is.na(cytokines_il18) == F) %>%
+  group_by(PatientID) %>%
+  summarise(across(all_of(biomarkers), \(x) log2(max(x, na.rm=T)+1), .names = "{.col}_max_d17"),
+            SOFA_max_d17 = max(Sofa_score, na.rm=T),
+            SOFA_min_d17 = min(Sofa_score, na.rm=T),
+            sepsis_max_d17 = max(sepsis, na.rm=T),
+            AKI_max_d17 = max(AKI, na.rm=T),
+            LDH_max_d17 = log2(max(LDH_max, na.rm=T)+1))
+
+max_d13 <- data_orig %>%
+  filter(Days < 4) %>%
+  group_by(PatientID) %>%
+  summarise(across(all_of(biomarkers), \(x) log2(max(x, na.rm=T)+1), .names = "{.col}_max_d13"),
+            SOFA_max_d13 = max(Sofa_score, na.rm=T),
+            sepsis_max_d13 = max(sepsis, na.rm=T),
+            AKI_max_d13 = max(AKI, na.rm=T),
+            LDH_max_d13 = log2(max(LDH_max, na.rm=T)+1))
+
+max_d27 <- data_orig %>%
+  filter(Days > 1 & Days < 8) %>%
+  group_by(PatientID) %>%
+  summarise(across(all_of(biomarkers), \(x) log2(max(x, na.rm=T)+1), .names = "{.col}_max_d27"),
+            SOFA_max_d27 = max(Sofa_score, na.rm=T),
+            SOFA_min_d27 = min(Sofa_score, na.rm=T),
+            sepsis_max_d27 = max(sepsis, na.rm=T),
+            AKI_max_d27 = max(AKI, na.rm=T))
+
+data <- merge(data,max_d17, by="PatientID",all.x=T)
+data <- merge(data,max_d13, by="PatientID", all.x=T)
+data <- merge(data,max_d27, by="PatientID", all.x=T)
+
+data$sepsis_d1_shock <- as.factor(ifelse(data$sepsis_d1 == "septic_shock", "shock", ifelse(is.na(data$sepsis_d1)==T, NA, "no_shock")))
+data$sepsis_max_shock <- as.factor(ifelse(data$sepsis_max == "septic_shock", "shock", ifelse(is.na(data$sepsis_max)==T, NA, "no_shock")))
+data$sepsis_max_d13_shock <- as.factor(ifelse(data$sepsis_max_d13 == "septic_shock", "shock", ifelse(is.na(data$sepsis_max_d13)==T, NA, "no_shock")))
+data$sepsis_max_d17_shock <- as.factor(ifelse(data$sepsis_max_d17 == "septic_shock", "shock", ifelse(is.na(data$sepsis_max_d17)==T, NA, "no_shock")))
+data$sepsis_max_d27_shock <- as.factor(ifelse(data$sepsis_max_d27 == "septic_shock", "shock", ifelse(is.na(data$sepsis_max_d27)==T, NA, "no_shock")))
+
+data$AKI_d1_yesno <- as.factor(ifelse(data$AKI_d1 == "No_AKI", "No_AKI", ifelse(is.na(data$AKI_d1)==T, NA, "AKI")))
+data$AKI_max_yesno <- as.factor(ifelse(data$AKI_max == "No_AKI", "No_AKI", ifelse(is.na(data$AKI_max)==T, NA, "AKI")))
+data$AKI_max_d13_yesno <- as.factor(ifelse(data$AKI_max_d13 == "No_AKI", "No_AKI", ifelse(is.na(data$AKI_max_d13)==T, NA, "AKI")))
+data$AKI_max_d17_yesno <- as.factor(ifelse(data$AKI_max_d17 == "No_AKI", "No_AKI", ifelse(is.na(data$AKI_max_d17)==T, NA, "AKI")))
+data$AKI_max_d27_yesno <- as.factor(ifelse(data$AKI_max_d27 == "No_AKI", "No_AKI", ifelse(is.na(data$AKI_max_d27)==T, NA, "AKI")))
+
+data[data==-Inf] <- NA
+
+```
+
+# 1. BAKI-I
+
+## 1.1 Overview
+
+### 1.1.1 Demography
+
+```{r Demography, echo=TRUE, message=FALSE, warning=FALSE}
+demography <- data_orig
+demography <- demography %>%
+  group_by(PatientID) %>%
+  summarise(number_of_measures = length(Days),
+            Gender = first(Gender),
+            Age = first(Age),
+            BMI = first(BMI),
+            SOFA_max = max(Sofa_score,na.rm = T),
+            SOFA_min = min(Sofa_score, na.rm = T),
+            sepsis_in = first(sepsis),
+            sepsis_out = last(sepsis),
+            sepsis_max = max(sepsis,na.rm = T),
+            sepsis_min = min(sepsis,na.rm = T),
+            survival = first(died_within_30d),
+            AKI_in  = first(AKI),
+            diab_mell = first(diab_mell),
+            cor_art_disease = first(cor_art_disease),
+            cortico_home = first(cortico_home),
+            nsaid_home = first(nsaid_home),
+            mech_vent_d1 = first(mech_vent_d1),
+            Hospital_length_days = first(Hospital_length_days),
+            ICU_length_days = first(ICU_length_days),
+            
+            ) %>%
+  mutate(SOFA_max = ifelse(SOFA_max == -Inf,  NA, SOFA_max)) %>%
+  mutate(SOFA_min = ifelse(SOFA_min == +Inf,  NA, SOFA_min))
+
+
+calculate_summary_stats <- function(data, na.rm=F) {
+  # Check if input is numeric
+    if (na.rm) {
+    data <- na.omit(data)
+  }
+  if (!is.numeric(data)) {
+    stop("Input must be numeric.")
+  }
+
+  # Calculate median and IQR
+  median_val <- median(data)
+  iqr <- IQR(data)
+  # Calculate range
+  data_range <- range(data)
+  # Create a list with the desired information
+  result_list <- list(
+    Median_IQR = paste0(median_val, " (", iqr, ")"),
+    Range = paste0(data_range[1], "-", data_range[2])
+  )
+  
+  return(result_list)
+}
+
+n_total <- dim(demography)[1] #n_total
+age <- calculate_summary_stats(demography$Age)
+
+male_n <- sum(demography$Gender == "M") #61%
+male_n <- paste0(male_n," (", round(male_n/n_total*100),")")
+female_n <- sum(demography$Gender == "F") 
+female_n <- paste0(female_n," (", round(female_n/n_total*100),")")
+
+bmi <- calculate_summary_stats(demography$BMI, na.rm=T)
+
+sofa <- calculate_summary_stats(demography$SOFA_max, na.rm=T)
+
+sepsis <- as.data.frame(table(demography$sepsis_in))$Freq
+sepsis <- append(sepsis,sum(is.na(demography$sepsis_in)))
+sepsis <- paste0(sepsis," (",round(sepsis/n_total*100),")")
+
+AKI <- as.data.frame(table(demography$AKI_in))$Freq
+AKI <- append(AKI,sum(is.na(demography$AKI_in)))
+AKI <- paste0(AKI," (",round(AKI/n_total*100),")")
+
+survival <- as.data.frame(table(demography$survival))$Freq
+survival <- paste0(survival," (",round(survival/n_total*100),")")
+
+diab <-  as.data.frame(table(demography$diab_mell))$Freq
+diab <- paste0(diab," (",round(diab/n_total*100),")")
+
+cortico <-  as.data.frame(table(demography$cortico_home))$Freq
+cortico <- paste0(cortico," (",round(cortico/n_total*100),")")
+
+nsaid <-  as.data.frame(table(demography$nsaid_home))$Freq
+nsaid <- paste0(nsaid," (",round(nsaid/n_total*100),")")
+
+mv <-  as.data.frame(table(demography$mech_vent_d1))$Freq
+mv <- paste0(mv," (",round(mv/n_total*100),")")
+
+length <- calculate_summary_stats(demography$Hospital_length_days)
+
+
+
+demography_table <- data.frame(
+  Characteristics = c("Age, years","Median (IQR)", "Min-max range", "Gender, n (%)", "Male", "Female", "Body mass index (BMI), kg/m2", "Median (IQR)", "Min-max range", "Highest SOFA during ICU", "Median (IQR)", "Min-max range", "Sepsis stage on day 1, n (%)","No sepsis", "Sepsis", "Septic shock", "No data","AKI stage on day 1, n (%)","No AKI", "Stage 1", "Stage 2", "Stage 3", "No data"),
+  
+  Total_cohort = c("",age[[1]], age[[2]], "", male_n, female_n, "", bmi[[1]], bmi[[2]], "", sofa[[1]], sofa[[2]], "",sepsis[[1]], sepsis[[2]], sepsis[[3]], sepsis[[4]],"",AKI[[1]], AKI[[2]], AKI[[3]], AKI[[4]], AKI[[5]])
+)
+
+# Print the table using kable
+kable(demography_table, format = "markdown", col.names = c("Characteristics", paste0("Total cohort (n=",n_total,")")),align = c('r','l'))
+
+```
+
+### 1.1.2 Characteristics
+
+```{r Characteristics, echo=TRUE, message=FALSE, warning=FALSE}
+source("sepsis_followup.R")
+plot_sepsis_all
+source("sofa_followup.R")
+plot_sofa_all
+source("AKI_followup.R")
+plot_AKI_all
+
+#survival
+ggbetweenstats(data, x=survival_30d, y = Age, type = "nonparametric") #sign
+ggbetweenstats(data, x=survival_30d, y = BMI, type = "nonparametric") #no
+chisq.test(table(select(data,c(cortico_home,survival_30d))))#no
+chisq.test(table(select(data,c(nsaid_home,survival_30d))))#no
+chisq.test(table(select(data,c(diab_mell,survival_30d))))#no
+chisq.test(table(select(data,c(mech_vent_d1,survival_30d))))#no
+chisq.test(table(select(data,c(cor_art_disease,survival_30d))))#no
+chisq.test(table(select(data,c(Gender,survival_30d))))#no
+
+#septic shock
+ggbetweenstats(data, x=sepsis_d1_shock, y = Age, type = "nonparametric")#no
+
+ggbetweenstats(data, x=sepsis_d1_shock, y = BMI, type = "nonparametric")#no
+chisq.test(table(select(data,c(cortico_home,sepsis_d1_shock))))#no
+chisq.test(table(select(data,c(nsaid_home,sepsis_d1_shock))))#no
+chisq.test(table(select(data,c(diab_mell,sepsis_d1_shock))))#no
+chisq.test(table(select(data,c(mech_vent_d1,sepsis_d1_shock)))) #0.04133
+chisq.test(table(select(data,c(cor_art_disease,sepsis_d1_shock))))  #no
+chisq.test(table(select(data,c(Gender,sepsis_d1_shock))))#no
+
+
+sofa <- select(data,c(SOFA_d1,Age, BMI))
+sofa <- na.exclude(sofa)
+cor(sofa$SOFA_d1,sofa$Age,method="spearman")
+cor(sofa$SOFA_d1,sofa$BMI,method="spearman")
+
+ggbetweenstats(data, x=cortico_home, y = SOFA_d1, type = "nonparametric")#no
+ggbetweenstats(data, x=Gender, y = SOFA_d1,type = "nonparametric")#no
+ggbetweenstats(data, x=nsaid_home, y = SOFA_d1,type = "nonparametric")#no
+ggbetweenstats(data, x=diab_mell, y = SOFA_d1,type = "nonparametric")#no
+ggbetweenstats(data, x=mech_vent_d1, y = SOFA_d1,type = "nonparametric")#p=9.55e-07
+ggbetweenstats(data, x=cor_art_disease, y = SOFA_d1,type = "nonparametric")#no
+
+#AKI
+ggbetweenstats(data, x=AKI_d1_yesno, y = Age, type = "nonparametric")#no
+ggbetweenstats(data, x=AKI_d1_yesno, y = BMI, type = "nonparametric")#no
+chisq.test(table(select(data,c(cortico_home,AKI_d1_yesno))))#no
+chisq.test(table(select(data,c(nsaid_home,AKI_d1_yesno))))#no
+chisq.test(table(select(data,c(diab_mell,AKI_d1_yesno))))#no
+chisq.test(table(select(data,c(mech_vent_d1,AKI_d1_yesno)))) 
+chisq.test(table(select(data,c(cor_art_disease,AKI_d1_yesno))))#no
+chisq.test(table(select(data,c(Gender,AKI_d1_yesno))))#no
+```
+
+## 1.2 
+### 1.2.1 Survival
+
+```{r Survival, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+
+for (biomarker in biomarkers){
+  list_graphs <-list()
+  c <- 1
+  suppressMessages( #annoying message about scale
+  graph <- ggbetweenstats(data, 
+               x = survival_30d, 
+               y = !!paste0(biomarker, "_max_d17"),
+               type = "nonparametric",
+               violin.args = list(width = 0), # remove violin
+               boxplot.args = list(alpha = 0.2, width = 0.2),
+               point.args = list(size = 1, alpha = 1, shape = 1,
+                                 position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+               centrality.point.args = list(size = 0), # remove mean point
+               centrality.label.args = list(alpha = 0), # remove mean label
+               title = paste("Max", biomarker, "day 1->7 vs day 30 survival"),
+               ylab = paste0("log2(",biomarker_names[which(biomarker == biomarkers)],"^max)"),
+               xlab = "30-day Survival",
+               ggtheme = ggthemes::theme_clean(),
+               theme(text = element_text(size = 8)))+
+  ggplot2::scale_color_manual(values = c("darkred","darkgreen"))
+  )
+  #ggsave(paste0("figures/survival/graph_surv_",c,".svg"), graph, width = 5, height = 5, units = "cm")
+list_graphs[[c]] <-graph
+c <- c+1
+
+#calculations for local minima
+da <- filter(data,
+             survival_30d=="Deceased")
+da <- da[complete.cases(da[[paste0(biomarker, "_max_d17")]]),]
+s <- density(da[[paste0(biomarker,"_max_d17")]])
+r <- turnpoints(s$y)
+if (r$nturns > 1){
+graph <- ggplot(data, aes(x = .data[[paste0(biomarker,"_max_d17")]], fill = survival_30d))+
+  geom_density(alpha=0.5, adjust=0.9)+
+  labs(fill="Survived",title = paste("Max", biomarker, "day 1->7"))+
+  xlim(c(0,20)) + 
+  geom_textvline(label=paste0(round(s$x[r$pits][1],2), " (",round(2^s$x[r$pits][1]-1,2), " µM/mL)"),
+                 xintercept = s$x[r$pits][1],
+                 col="red",
+                 vjust=-0.3)} else{
+graph <- ggplot(data, aes(x = .data[[paste0(biomarker,"_max_d17")]], fill = survival_30d))+
+  geom_density(alpha=0.5, adjust=0.9)+
+  labs(fill="Survived",title = paste(biomarker, "day 1->7"))+
+  xlim(c(0,20))}
+list_graphs[[c]] <-graph
+c <- c+1
+
+if (r$nturns > 1){
+surviva <- data
+surviva$above <- factor(ifelse(surviva[[paste0(biomarker,"_max_d17")]]>=s$x[r$pits][1], 1, 0),
+                                labels = c("below cutoff", "above cutoff"))
+
+graph <- survfit2(Surv(interval_ceil30, censoring_30d) ~ above, data = surviva) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability",
+    title = paste(biomarker, "Max day 1 -> 7 cutoff")
+  )+
+  add_confidence_interval()+
+  add_censor_mark()+
+  add_risktable()+
+  add_pvalue()
+list_graphs[[c]] <-graph
+c <- c+1
+}
+
+
+l <- coxph(Surv(interval, censoring) ~ get(paste0(biomarker,"_max_d17")) +Age+BMI+Gender+cor_art_disease+diab_mell, data = data)
+names(l$coefficients)[1] <- paste("Max",biomarker,"day 1->7")
+graph <- sjPlot::plot_model(l,show.values = T,show.p = T,title = paste("Max",biomarker, "day 1->7"))
+list_graphs[[c]] <-graph
+c <- c+1
+
+l <- coxph(Surv(interval, censoring) ~ get(paste0(biomarker,"_max_d17")) +SOFA_max_d17+Age+BMI+Gender+cor_art_disease+diab_mell, data = data)
+names(l$coefficients)[1] <- paste("Max",biomarker,"day 1->7")
+graph <- sjPlot::plot_model(l,show.values = T,show.p = T,title = paste("Max",biomarker, "day 1->7"))
+list_graphs[[c]] <-graph
+
+grid.arrange(grobs = list_graphs, nrow = 1, ncol = c)
+#ggsave(paste0("CDDiff/raw/",biomarker,".png"), grid.arrange(grobs = list_graphs, nrow = 1, ncol = c),width = 1000*c, height = 1000, units = "px")
+}
+
+
+coxph(Surv(interval_ceil30, censoring_30d) ~ cytokines_il6_max_d17+cytokines_il1b_max_d17+cytokines_tnf_max_d17+cytokines_il18_max_d17+cytokines_il10_max_d17+cytokines_il1a_max_d17+cytokines_il1ra_max_d17+MDA_max_d17+SCI_max_d17+gdf15_value_max_d17+chitinase_value_max_d17+u_chitinase_value_max_d17+Age+BMI+Gender+cor_art_disease+diab_mell, data = data) %>%
+  tbl_regression(exp = TRUE)
+
+coxph(Surv(interval_ceil30, censoring_30d) ~ cytokines_il6_max_d17+cytokines_il1b_max_d17+cytokines_tnf_max_d17+cytokines_il18_max_d17+cytokines_il10_max_d17+cytokines_il1a_max_d17+cytokines_il1ra_max_d17+MDA_max_d17+SCI_max_d17+gdf15_value_max_d17+chitinase_value_max_d17+u_chitinase_value_max_d17+Age+BMI+Gender+cor_art_disease+diab_mell+SOFA_max_d17, data = data) %>%
+  tbl_regression(exp = TRUE)
+
+
+#
+
+### day 1-3 prediction value survival
+data_prediction <- data %>%
+  select(c(cytokines_il6_max_d13,cytokines_il1b_max_d13,cytokines_tnf_max_d13,cytokines_il18_max_d13,cytokines_il10_max_d13,cytokines_il1a_max_d13,cytokines_il1ra_max_d13,gdf15_value_max_d13,MDA_max_d13,SCI_max_d13,u_chitinase_value_max_d13,chitinase_value_max_d13,Age,BMI,Gender,cor_art_disease,diab_mell,survival_30d))
+data_prediction <- na.exclude(data_prediction)
+
+ctrl <- trainControl(method="LOOCV",summaryFunction=twoClassSummary, classProbs=T)
+
+
+
+model_restr <- glm(survival_30d ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,family="binomial")
+
+model_opti <- step(model_restr, direction="forward",scope = formula(~cytokines_il6_max_d13+cytokines_il1b_max_d13+cytokines_tnf_max_d13+cytokines_il18_max_d13+cytokines_il10_max_d13+cytokines_il1a_max_d13+cytokines_il1ra_max_d13+gdf15_value_max_d13+MDA_max_d13+SCI_max_d13+u_chitinase_value_max_d13+chitinase_value_max_d13+Age+BMI+Gender+cor_art_disease+diab_mell))
+
+model_complete <- train(survival_30d ~ . , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_complete
+model_restr <- train(survival_30d ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_restr
+model_opt <- train(survival_30d ~ Age+BMI+Gender+cor_art_disease+diab_mell+cytokines_tnf_max_d13+cytokines_il1a_max_d13+cytokines_il1ra_max_d13+gdf15_value_max_d13+MDA_max_d13+SCI_max_d13,method="glm",data=data_prediction,family = binomial(), trControl = ctrl )
+model_opt
+
+res_compl <- evalm(model_complete, showplots =F, silent = T)
+res_restr <- evalm(model_restr, showplot=F, silent = T)
+res_opt <- evalm(model_opt, showplot=F, silent = T)
+
+
+
+data_opt <- data.frame(sens = res_opt$roc$data$SENS,
+                       fpr = res_opt$roc$data$FPR,
+                       group = "opt")
+data_restr <- data.frame(sens = res_restr$roc$data$SENS,
+                         fpr = res_restr$roc$data$FPR,
+                         group = "restr")
+
+data_graph <- bind_rows(data_opt,data_restr)
+ggplot(data = data_graph, mapping = aes(x = fpr, y = sens, col = group))+
+  geom_line()+
+  geom_abline()+
+  ggthemes::theme_clean()+
+  scale_color_manual(values = c("darkgreen", "darkred"), guide="none")
+
+# ggsave("pred_surv.svg",width=7.5,height=7.5,units = "cm")
+
+
+#correlation
+variables <- paste0(biomarkers,"_max_d17")
+variables <- append(variables,c("SOFA_max_d17",
+                                "Age",
+                                "BMI"))
+corr_data <- data[variables] %>%
+  filter(is.na(cytokines_il18_max_d17) == F)
+corr_data <- corr_data[complete.cases(corr_data),]
+colnames(corr_data) <- c("IL6","IL1β","TNF","IL18","IL10","IL1ɑ","IL1ra","GDF15","MDA","$Fe[c]","u-CHI3L1","p-CHI3L1","SOFA","Age","BMI")  
+  
+source("corrplot2.R")
+corrplot2(
+  data = corr_data,
+  method = "spearman",
+  sig.level = 0.05,
+  order = "original",
+  diag = FALSE,
+  type = "upper",
+  tl.srt = 75,
+  number.font = 0.5,
+  number.cex = 0.5,
+  tl.cex = 0.5
+)
+
+
+```
+
+### 1.2.2 SOFA
+
+```{r SOFA, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+c <- 1
+list_graphs <- list()
+for (biomarker in biomarkers){
+  graph <- ggscatterstats(data = data, x = SOFA_max_d17, y = !!paste0(biomarker,"_max_d17"), type = "nonparametric",
+  ylab = paste0("log2(",biomarker_names[which(biomarker == biomarkers)],"^max)"),
+  xlab = ("SOFA^max"),
+  ggtheme = ggthemes::theme_clean(),
+  marginal=F,
+  smooth.line.args = list(col="darkred",
+                          fill="darkred",
+                          method="lm"))
+ # ggsave(paste0("graph_sofa_",c,".svg"), graph, width = 5, height = 5, units = "cm")
+  list_graphs[[c]] <- graph
+  c <- c+1
+}
+#ggsave(paste0("graphs_with_own/","biomarkers","_vs_SOFA.png"), grid.arrange(grobs = list_graphs, nrow = 3, ncol = 4),width = 6000, height = 3000, units = "px") 
+
+#
+ggplot(data, aes(x = SOFA_d1, fill = survival_30d))+
+  geom_density(alpha=0.5, adjust=0.6)+
+  labs(fill="Survived",title = "SOFA on day 1 vs day 30 survival")
+ggplot(data, aes(x = SOFA_max_d17, fill = survival_30d))+
+  geom_density(alpha=0.5, adjust=0.6)+
+  labs(fill="Survived",title = "Max SOFA day 1->7 vs day 30 survival")
+ggplot(data, aes(x = SOFA_max_d13, fill = survival_30d))+
+  geom_density(alpha=0.5, adjust=0.6)+
+  labs(fill="Survived",title = "Max SOFA day 1->3 vs day 30 survival")
+
+ctrl <- trainControl(method="LOOCV",savePredictions  =T)
+data_prediction <- data %>%
+  select(SOFA_max_d27, Age , BMI , Gender , diab_mell , cor_art_disease, cytokines_il6_d1 , cytokines_il18_d1 , cytokines_il10_d1 , cytokines_il1ra_d1 , gdf15_value_d1 , chitinase_value_d1 , cytokines_il1b_d1  , cytokines_tnf_d1  ,MDA_d1,SCI_d1,u_chitinase_value_d1)
+
+
+data_prediction <- na.exclude(data_prediction)
+
+model_restr <- lm(SOFA_max_d27 ~ Age + BMI + Gender + diab_mell + cor_art_disease, data = data_prediction)
+model_restr
+
+model_opt <- step(model_restr,direction="forward", scope=formula(~Age + BMI + Gender + diab_mell + cor_art_disease  + cytokines_il6_d1 + cytokines_il18_d1 + cytokines_il10_d1 + cytokines_il1ra_d1 + gdf15_value_d1 + chitinase_value_d1 + cytokines_il1b_d1  + cytokines_tnf_d1  +MDA_d1+SCI_d1+u_chitinase_value_d1))
+summary(model_opt)
+
+model_complete <- train(SOFA_max_d27 ~ Age + BMI + Gender + diab_mell + cor_art_disease  + cytokines_il6_d1 + cytokines_il18_d1 + cytokines_il10_d1 + cytokines_il1ra_d1 + gdf15_value_d1 + chitinase_value_d1 + cytokines_il1b_d1  + cytokines_tnf_d1  +MDA_d1+SCI_d1+u_chitinase_value_d1, data = data_prediction, method="lm",trControl = ctrl)
+model_complete
+
+
+model_opt <- train(SOFA_max_d27 ~ Age + BMI + Gender + diab_mell + cor_art_disease  + cytokines_il1ra_d1  + chitinase_value_d1 + +SCI_d1, data = data_prediction,method="lm",trControl = ctrl)
+model_opt
+
+
+model_restr <- train(SOFA_max_d27 ~ Age + BMI + Gender + diab_mell + cor_art_disease, data = data_prediction,method="lm",trControl = ctrl)
+model_restr
+
+
+model_data <- data.frame(
+  obs = c(model_opt$pred$obs, model_restr$pred$obs),
+  fitted_values = c(model_opt$finalModel$fitted.values, model_restr$finalModel$fitted.values),
+  model_type = factor(rep(c("Optimized (IL1ra, chitinase, and catalytic iron)", "Restricted (patient characteristics \n and comorbidities)"), 
+                          c(length(model_opt$pred$obs), length(model_restr$pred$obs)))))
+
+# Plot with ggplot
+ggplot(model_data, aes(x = obs, y = fitted_values, color = model_type)) +
+  geom_point(shape=21,alpha=0.5) +
+  geom_smooth(method = 'lm', formula = y ~ x,
+              alpha = 0.5) +
+  xlab("Observed SOFA") +
+  ylab("Predicted SOFA") +
+  xlim(0, 19) +
+  ylim(0, 19) +
+  #ggtitle("Predicted vs observed maximal SOFA") +
+  #geom_abline(intercept = 0, slope = 1, color = "black") +
+  labs(color = "Model Type")+
+  scale_color_manual(values = c("darkgreen","darkred"),guide="none")+
+  
+  ggthemes::theme_clean()
+# ggsave("prediction_sofa.svg", width = 7.5, height = 7.5, units = "cm")
+summary(model_restr)
+anova(model_restr$finalModel, model_complete$finalModel)
+
+
+biomarkers_all <- log2(filter(data_orig,Days<7)[biomarkers]+1)
+biomarkers_all <- na.exclude(biomarkers_all)
+corrplot(cor(biomarkers_all,method = "spearman"),type = "lower",diag = F)
+
+```
+
+### 1.2.3 Sepsis
+
+```{r Sepsis, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+
+c <- 1
+for (biomarker in biomarkers){
+  suppressMessages( #annoying message about scale
+  graph <- ggbetweenstats(data, x=sepsis_max_d17, y = !!paste0(biomarker,"_max_d17"),
+                        type = "nonparametric",
+                        violin.args = list(width = 0), #remove violin
+                        boxplot.args = list(alpha = 0.2, width=0.2),
+                        point.args = list(size = 1, alpha = 1, shape = 1,
+                                          position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+                        centrality.point.args = list(size = 0),#remove mean point
+                        centrality.label.args = list(alpha = 0),#remove mean label
+                        title = paste("Max", biomarker,"vs sepsis stage during the first 7 ICU days"),
+               ylab = paste0("log2(",biomarker_names[which(biomarker == biomarkers)],"^max)"),
+               xlab = "Sepsis^max",
+               ggtheme = ggthemes::theme_clean())+
+  ggplot2::scale_color_manual(values = c("darkgreen","darkorange", "darkred"))+
+  ggplot2::scale_x_discrete(labels = c("No sepsis", "Sepsis","Septic shock"))
+  )
+  c <- c+1
+ #ggsave(paste0("figures/sepsis/graph_sepsis_",c,".svg"), graph, width = 5, height = 5, units = "cm")
+print(graph)
+# ggsave(paste0("graphs_with_own/",biomarker,"_sepsis.png"),width = 1000, height = 1000, units = "px")
+
+}
+
+#data <- filter(data, max_sepsis != "no_sepsis")
+s <- survfit2(Surv(interval_ceil30, censoring_30d) ~ sepsis_max_d17, data =data) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability",
+    title = "Shock on d1 vs survival"
+  )+
+  add_censor_mark()+
+  add_risktable()+
+  add_pvalue()
+
+s
+
+l <- coxph(Surv(interval, censoring) ~ sepsis_max_d17_shock+Age+BMI+Gender+cor_art_disease+diab_mell, data = data)
+sjPlot::plot_model(l,show.values = T,show.p = T)
+
+ctrl <- trainControl(method="LOOCV",savePredictions  =T)
+
+
+### day 1 prediction no sepsis vs. sepsis
+
+data_prediction <- data %>%
+  filter(!is.na(sepsis_max_d17)) %>%
+  mutate(sepsis_max_d27_yesno = ifelse(sepsis_max_d27 == "no_sepsis", "no_sepsis", "sepsis_or_shock")) %>% 
+  mutate(sepsis_max_d27_yesno = factor(sepsis_max_d27_yesno, levels = c("no_sepsis","sepsis_or_shock"))) %>%
+  select(c(sepsis_max_d27_yesno , cytokines_il6_d1,cytokines_il1b_d1,cytokines_tnf_d1,cytokines_il18_d1,cytokines_il10_d1,cytokines_il1a_d1,cytokines_il1ra_d1,gdf15_value_d1,MDA_d1,SCI_d1,u_chitinase_value_d1,chitinase_value_d1,Age,BMI,Gender,cor_art_disease,diab_mell))
+data_prediction <- na.exclude(data_prediction)
+ctrl <- trainControl(method="LOOCV",summaryFunction=twoClassSummary, classProbs=T)
+
+
+model_restr <- glm(sepsis_max_d27_yesno ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,family="binomial")
+
+model_opti <- step(model_restr, direction="forward",scope = formula(~cytokines_il6_d1+cytokines_il1b_d1+cytokines_tnf_d1+cytokines_il18_d1+cytokines_il10_d1+cytokines_il1a_d1+cytokines_il1ra_d1+gdf15_value_d1+MDA_d1+SCI_d1+u_chitinase_value_d1+chitinase_value_d1+Age+BMI+Gender+cor_art_disease+diab_mell))
+
+
+model_complete <- train(sepsis_max_d27_yesno ~ . , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_complete
+model_restr <- train(sepsis_max_d27_yesno ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_restr
+
+model_opt <- train(sepsis_max_d27_yesno ~ cytokines_il6_d1+Age+BMI+Gender+cor_art_disease+diab_mell,method="glm",data=data_prediction,family = binomial(), trControl = ctrl )
+model_opt
+
+### day 1 prediction no_sepsis or sepsis vs septic shock
+data_prediction <- data %>%
+  filter(!is.na(sepsis_max_d17)) %>%
+  select(c(sepsis_max_d27_shock , cytokines_il6_d1,cytokines_il1b_d1,cytokines_tnf_d1,cytokines_il18_d1,cytokines_il10_d1,cytokines_il1a_d1,cytokines_il1ra_d1,gdf15_value_d1,MDA_d1,SCI_d1,u_chitinase_value_d1,chitinase_value_d1,Age,BMI,Gender,cor_art_disease,diab_mell))
+data_prediction <- na.exclude(data_prediction)
+ctrl <- trainControl(method="LOOCV",summaryFunction=twoClassSummary, classProbs=T)
+
+
+
+model_restr <- glm(sepsis_max_d27_shock ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,family="binomial")
+
+model_opti <- step(model_restr, direction="forward",scope = formula(~cytokines_il6_d1+cytokines_il1b_d1+cytokines_tnf_d1+cytokines_il18_d1+cytokines_il10_d1+cytokines_il1a_d1+cytokines_il1ra_d1+gdf15_value_d1+MDA_d1+SCI_d1+u_chitinase_value_d1+chitinase_value_d1+Age+BMI+Gender+cor_art_disease+diab_mell))
+
+model_complete <- train(sepsis_max_d27_shock ~ . , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_complete
+model_restr <- train(sepsis_max_d27_shock ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_restr
+model_opt <- train(sepsis_max_d27_shock ~ cytokines_tnf_d1+cytokines_il10_d1+cytokines_il1a_d1+chitinase_value_d1+Age+BMI+Gender+cor_art_disease+diab_mell,method="glm",data=data_prediction,family = binomial(), trControl = ctrl )
+model_opt
+
+res_compl <- evalm(model_complete)
+res_restr <- evalm(model_restr)
+res_opt <- evalm(model_opt)
+
+
+
+data_opt <- data.frame(sens = res_opt$roc$data$SENS,
+                       fpr = res_opt$roc$data$FPR,
+                       group = "opt")
+data_restr <- data.frame(sens = res_restr$roc$data$SENS,
+                         fpr = res_restr$roc$data$FPR,
+                         group = "restr")
+
+data_graph <- bind_rows(data_opt,data_restr)
+ggplot(data = data_graph, mapping = aes(x = fpr, y = sens, col = group))+
+  geom_line()+
+  geom_abline()+
+  ggthemes::theme_clean()+
+  scale_color_manual(values = c("darkgreen", "darkred"),guide="none")
+
+#ggsave("pred_sepsis.svg",width=7.5,height=7.5,units = "cm")
+  
+```
+
+### 1.2.4 AKI
+
+```{r AKI, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+
+for (biomarker in biomarkers){
+  graph <- ggbetweenstats(data, x=AKI_max_d17_yesno, y = !!paste0(biomarker,"_max_d17"),
+                        type = "nonparametric",
+                        violin.args = list(width = 0), #remove violin
+                        boxplot.args = list(alpha = 0.2, width=0.2),
+                        point.args = list(size = 1, alpha = 1, shape = 1,
+                                          position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+                        centrality.point.args = list(size = 0),#remove mean point
+                        centrality.label.args = list(alpha = 0),#remove mean label
+                        title = paste("Max",biomarker,"vs AKI in the first 7 ICU days"), 
+                        ylab = paste0("log2(",biomarker_names[which(biomarker == biomarkers)],"^max)"),
+                        xlab = "AKI during first 7 days",
+                        ggtheme = ggthemes::theme_clean(),
+                        theme(text = element_text(size = 8)))+
+  ggplot2::scale_color_manual(values = c("darkgreen","darkred"))+
+  ggplot2::scale_x_discrete(labels = c("AKI","No AKI"))
+c <- c+1
+print(graph)
+# ggsave(paste0("graph_sepsis_",c,".svg"), graph, width = 5, height = 5, units = "cm")
+# ggsave(paste0("graphs_with_own/",biomarker,"_AKI.png"),width = 1000, height = 1000, units = "px")
+
+}
+
+#
+survfit2(Surv(interval_ceil30, censoring_30d) ~ AKI_max_d17_yesno, data = data) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability",
+    title = "AKI during the first 7 ICU days"
+  )+
+  add_censor_mark()+
+  add_risktable()+
+  add_pvalue()
+
+
+l <- coxph(Surv(interval, censoring) ~ AKI_max_d17_yesno+Age+BMI+Gender+cor_art_disease+diab_mell, data = data)
+sjPlot::plot_model(l,show.values = T,show.p = T)
+
+
+
+ctrl <- trainControl(method="LOOCV",savePredictions  =T)
+### day 1 prediction value survival
+data_prediction <- data %>%
+  select(c(AKI_max_d27_yesno , cytokines_il6_d1,cytokines_il1b_d1,cytokines_tnf_d1,cytokines_il18_d1,cytokines_il10_d1,cytokines_il1a_d1,cytokines_il1ra_d1,gdf15_value_d1,MDA_d1,SCI_d1,u_chitinase_value_d1,chitinase_value_d1,Age,BMI,Gender,cor_art_disease,diab_mell))
+data_prediction <- na.exclude(data_prediction)
+ctrl <- trainControl(method="LOOCV",summaryFunction=twoClassSummary, classProbs=T)
+
+
+
+model_restr <- glm(AKI_max_d27_yesno ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,family="binomial")
+
+model_opti <- step(model_restr, direction="forward",scope = formula(~cytokines_il6_d1+cytokines_il1b_d1+cytokines_tnf_d1+cytokines_il18_d1+cytokines_il10_d1+cytokines_il1a_d1+cytokines_il1ra_d1+gdf15_value_d1+MDA_d1+SCI_d1+u_chitinase_value_d1+chitinase_value_d1+Age+BMI+Gender+cor_art_disease+diab_mell))
+
+model_complete <- train(AKI_max_d27_yesno ~ . , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_complete
+model_restr <- train(AKI_max_d27_yesno ~ Age+BMI+Gender+cor_art_disease+diab_mell , data = data_prediction,method="glm", family = binomial(), trControl = ctrl)
+model_restr
+model_opt <- train(AKI_max_d27_yesno ~ SCI_d1+u_chitinase_value_d1+Age+BMI+Gender+cor_art_disease+diab_mell,method="glm",data=data_prediction,family = binomial(), trControl = ctrl )
+model_opt
+
+res_compl <- evalm(model_complete)
+res_restr <- evalm(model_restr)
+res_opt <- evalm(model_opt)
+
+
+
+data_opt <- data.frame(sens = res_opt$roc$data$SENS,
+                       fpr = res_opt$roc$data$FPR,
+                       group = "opt")
+data_restr <- data.frame(sens = res_restr$roc$data$SENS,
+                         fpr = res_restr$roc$data$FPR,
+                         group = "restr")
+
+data_graph <- bind_rows(data_opt,data_restr)
+ggplot(data = data_graph, mapping = aes(x = fpr, y = sens, col = group))+
+  geom_line()+
+  geom_abline()+
+  ggthemes::theme_clean()+
+  scale_color_manual(values = c("darkgreen", "darkred"),guide="none")
+
+# ggsave("pred_AKI.svg",width=7.5,height=7.5,units = "cm")
+
+```
+
+## 1.3 Clustering
+
+### 1.3.1 Gaussian mixture
+
+#### 1.3.1.1 Based on day 1 value
+
+```{r Clustering, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE, results='hide'}
+# 1.2.1.1 Day 1 values ------------------------------------------------------
+cluster_palette <- c("#CE525D","#33AF7D","#6B79B9","#F6A658","#BF84B8")
+data_clustering <- data
+
+biomarkers_d1 <- paste0(biomarkers,"_d1")
+
+data_clustering <- data_clustering[complete.cases(data_clustering[,biomarkers_d1]), ]
+
+normalized_data <- as.data.frame(rescale(data_clustering[biomarkers_d1]))
+
+
+clPairs(normalized_data[biomarkers_d1],data_clustering$survival_30d,colors = c("red","green"))
+
+BIC <- mclustBIC(normalized_data,modelNames = c("VEI","EEV","EVI","VEV","VVI","EVV","EEE","VVV"))
+plot(BIC)
+ICL <- mclustICL(normalized_data)
+plot(ICL)
+clust <- Mclust(normalized_data, x=BIC, G=5)
+summary(clust)
+data_clustering$classification <- factor(clust$classification)
+
+s <- clustvarsel(normalized_data, search="greedy",direction="backward")
+plot(s$model$BIC)
+plot(BIC,)
+
+#Comparison of interesting markers between clusters
+data_clustering$classification <- factor(s$model$classification)
+data_clustering$cluster2 <- as.factor(ifelse(data_clustering$classification==2,"cluster 2","other clusters"))
+c <- 0
+for (biomarker in rownames(s$model$parameters$mean)){
+  graph <- ggbetweenstats(data_clustering, x=classification, y = !!biomarker,
+               type = "nonparametric",
+               violin.args = list(width = 0), #remove violin
+               boxplot.args = list(alpha = 0.2, width=0.2),
+               point.args = list(size = 1, alpha = 1, shape = 1,
+                                 position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+               centrality.point.args = list(size = 0),#remove mean point
+               centrality.label.args = list(alpha = 0),#remove mean label
+               title = biomarker,
+               xlab = "Cluster",
+               p.adjust.method = "BH",
+               ylab = paste0("log2(",biomarker_names[which(str_split(biomarker,"_d1")[[1]][1] == biomarkers)],"^d1)")) +
+  theme(text = element_text(size = 8)) + ggthemes::theme_clean()+
+  scale_color_manual(values = cluster_palette,guide="none")
+  c <- c+1
+  graph
+# ggsave(paste0("test_",c,".svg"), width = 5.5, height = 7.5, units = "cm")  
+
+  # ggsave(paste0("mclust/d1/",biomarker,"_graph.png"), graph,width=5.6, height=7.39)
+}
+
+
+#### predict survival ####
+survfit2(Surv(interval_ceil30, censoring_30d) ~ as.factor(classification), data = data_clustering) %>%
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+  )+
+  ylim(0,1)+
+  ggthemes::theme_clean()+
+  scale_color_manual(values = cluster_palette)
+# ggsave("km_classification.svg",width=10,height=7,units="cm")
+
+data_clustering$classification <- relevel(data_clustering$classification,ref = 2)
+
+coxph(Surv(interval_ceil30, censoring_30d) ~ as.factor(classification)+Age+Gender+BMI+diab_mell+cor_art_disease, data = data_clustering) %>%
+  tbl_regression(exp = TRUE)
+
+coxph(Surv(interval_ceil30, censoring_30d) ~ as.factor(classification)+Age+Gender+BMI+diab_mell+cor_art_disease+SOFA_d1, data = data_clustering) %>%
+  tbl_regression(exp = TRUE)
+
+
+ggbetweenstats(data_clustering, x=classification, y = Age,
+               type = "nonparametric",
+               violin.args = list(width = 0), #remove violin
+               boxplot.args = list(alpha = 0.2, width=0.2),
+               point.args = list(size = 1, alpha = 1, shape = 1,
+                                 position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+               centrality.point.args = list(size = 0),#remove mean point
+               centrality.label.args = list(alpha = 0),#remove mean label
+               title = "Age",
+               p.adjust.method = "BH") +
+  theme(text = element_text(size = 8)) # Adjust the size as needed
+ggbetweenstats(data_clustering, x=classification, y = BMI,
+               type = "nonparametric",
+               violin.args = list(width = 0), #remove violin
+               boxplot.args = list(alpha = 0.2, width=0.2),
+               point.args = list(size = 1, alpha = 1, shape = 1,
+                                 position = ggplot2::position_jitterdodge(dodge.width = 0.6)),
+               centrality.point.args = list(size = 0),#remove mean point
+               centrality.label.args = list(alpha = 0),#remove mean label
+               title = "BMI",
+               p.adjust.method = "BH") +
+  theme(text = element_text(size = 8)) # Adjust the size as needed
+
+
+prop_data <- data_clustering %>%
+  group_by(classification, survival_30d) %>%
+  summarise(Count = n()) %>%
+  group_by(classification) %>%
+  mutate(Prop = Count / sum(Count))
+
+ggplot(prop_data, aes(x = classification, y = Prop, fill = survival_30d)) +
+  geom_bar(stat = "identity", position = "stack") +
+    geom_text(aes(label = paste("n =",Count)), position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  labs(title = "30-day Survival by Cluster",
+       x = paste("Cluster"),
+       y = "Proportion") +
+  theme_minimal()
+
+prop_data <- data_clustering %>%
+  group_by(classification, AKI_max_d17_yesno) %>%
+  summarise(Count = n()) %>%
+  group_by(classification) %>%
+  mutate(Prop = Count / sum(Count))
+
+ggplot(prop_data, aes(x = classification, y = Prop, fill = AKI_max_d17_yesno)) +
+  geom_bar(stat = "identity", position = "stack") +
+    geom_text(aes(label = paste("n =",Count)), position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  labs(title = "AKI during the first 7 ICU days by Cluster",
+       x = paste("Cluster"),
+       y = "Proportion") +
+  theme_minimal()
+
+data_clustering$sepsis_max_d17_shock <- relevel(data_clustering$sepsis_max_d17_shock,"shock")
+prop_data <- data_clustering %>%
+  filter(!is.na(sepsis_max_d17_shock))%>%
+  group_by(classification, sepsis_max_d17) %>%
+  summarise(Count = n()) %>%
+  group_by(classification) %>%
+  mutate(Prop = Count / sum(Count))
+
+ggplot(prop_data, aes(x = classification, y = Prop, fill = sepsis_max_d17)) +
+  geom_bar(stat = "identity", position = "stack") +
+    geom_text(aes(label = paste("n =",Count)), position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  labs(title = "Septic shock during the first 7 ICU days by Cluster",
+       x = paste("Cluster"),
+       y = "Proportion") +
+  theme_minimal()
+
+
+#BIC plots
+BIC <- mclustBIC(normalized_data)
+BIC <- s$model$BIC
+BIC_allvars <- data.frame(EII=BIC[,"EII"],
+                          VII=BIC[,"VII"],
+                          EEI=BIC[,"EEI"],
+                          EEE=BIC[,"EEE"],
+                          EEV=BIC[,"EEV"],
+                          VEV=BIC[,"VEV"],
+                          comp=c(1,2,3,4,5,6,7,8,9))
+
+
+a <- pivot_longer(BIC_allvars,
+                  cols=colnames(BIC_allvars)[1:6])
+
+ggplot(a, aes(x=comp,y=value,col=name))+
+  geom_line()+
+  geom_point()+
+  ggthemes::theme_clean()+
+  ylab("BIC")+
+  guides(col=guide_legend("Mclust model"))+
+  theme(legend.text = element_text(size = 10))+
+  scale_x_discrete(name ="Number of clusters", 
+                   limits=c("1","2","3","4","5","6","7","8","9"))
+# ggsave("b.svg", width = 12, height = 5, units = "cm")
+
+
+
+```
+
+
+## 1.4 Targeted interventions
+
+```{r Targeted interventions, echo=TRUE, fig.width=15, message=FALSE, warning=FALSE, results='hide'}
+source("targeted_interventions.R")
+figA
+#ggsave("figA.svg", figA, device = svglite::svglite)
+figC
+#ggsave("figC.svg", figC, device = svglite::svglite,  width = 7, height=3)
+figD
+#ggsave("figD.svg", figD, device = svglite::svglite,  width = 7, height=3)
+survival_rapos_18pos_thresh
+survival_rapos_18pos_kml
+survival_MDA
+```
+
