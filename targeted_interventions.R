@@ -5,7 +5,7 @@
 pats <- data %>%
   select(c(PatientID, survival_30d, cytokines_il18_max_d17, cytokines_il1ra_max_d17, MDA_max_d17)) %>%
   mutate(il18_pos = ifelse(cytokines_il18_max_d17 >= 6.6, 1, 0),
-         MDA_pos = ifelse(MDA_max_d17 >= 1.94, 1, 0), #based on density for deceased group
+         MDA_pos = ifelse(MDA_max_d17 >= 3.93, 1, 0), #based on density for deceased group
          il1ra_pos = ifelse(cytokines_il1ra_max_d17 > 0, 1, 0))
 pats <- pats[complete.cases(pats$cytokines_il18_max_d17),]
 
@@ -165,10 +165,10 @@ table(select(data_graph_unique, c(survival_30d, il1ra_pos, il18_pos_kml, MDA_pos
 # Figure C & D: IL18+/- IL1ra+ trajectories
 graph_il1rapos_il18pos <- plotSpecCat(data_graph, "il1ra_pos==1 & il18_pos==1")
 figC <- graph_il1rapos_il18pos <- plotSpecCat(data_graph, "il1ra_pos==1 & il18_pos_kml==1")
-# ggsave(plot = graph_il1rapos_il18pos, "figures/il18_il1ra_classification/il18pos_il1rapos_kml.svg", width=15,height=7.5,units = "cm")
+ggsave(plot = graph_il1rapos_il18pos, "figures/il18_il1ra_classification/il18pos_il1rapos_kml.svg", width=18,height=7.5,units = "cm")
 graph_il1rapos_il18neg <- plotSpecCat(data_graph, "il1ra_pos==1 & il18_pos==0")
 figD <- graph_il1rapos_il18neg <- plotSpecCat(data_graph, "il1ra_pos==1 & il18_pos_kml==0")
-# ggsave(plot=graph_il1rapos_il18neg, "figures/il18_il1ra_classification/il18neg_il1rapos_kml.svg", width=15,height=7.5,units = "cm")
+ggsave(plot=graph_il1rapos_il18neg, "figures/il18_il1ra_classification/il18neg_il1rapos_kml.svg", width=18,height=7.5,units = "cm")
 
 
 
@@ -210,7 +210,7 @@ survival_MDA <- survfit2(Surv(interval_ceil30, censoring_30d) ~ as.factor(MDA_po
     y = "Overall survival probability"
   )+
   ylim(0,1)+
-  #add_pvalue()+
+  add_pvalue()+
   ggthemes::theme_clean()
 # ggsave("figures/il18_il1ra_classification/MDA_surv_thresh.svg", width=7,height=4,units = "cm")
 

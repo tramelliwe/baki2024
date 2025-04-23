@@ -4,7 +4,7 @@
 ##### Connection with MySQL (#available in sql.RData)
 library(RMySQL)
 library(tidyr)
-library(xlsx)
+library(openxlsx)
 library(ggplot2)
 library(dplyr)
 library(outliers)
@@ -75,6 +75,10 @@ Baki_VasoPres$ObsDate<- as.POSIXct(Baki_VasoPres$ObsDate, "GMT")
 Baki_VasoPres$ObsDate<- as.POSIXct(format(Baki_VasoPres$ObsDate, "%Y-%m-%d 12:00"), "GMT")
 Baki_Medication$GivenAt<- as.POSIXct(Baki_Medication$GivenAt, "GMT")
 
+Baki_Infections$infectionstart<- as.POSIXct(Baki_Infections$infectionstart, "GMT")
+Baki_Infections$infectionend <- as.POSIXct(Baki_Infections$infectionend, "GMT")
+
+
 HospitalDate$ICU_length_days <- difftime(HospitalDate$ICUDischargeTime,HospitalDate$ICUAdmissionTime,
                                          units = "days")
 HospitalDate$Hospital_length_days <- difftime(HospitalDate$HospitalDischargeTime,HospitalDate$HospitalAdmissionTime,
@@ -137,13 +141,14 @@ baki_i <- baki_i %>%
 
 #Duplicate rows based on the number of days stayed
 df_new <- baki_i %>%
-  select(c(StudyID,PatientID,Study,Gender,Age,Length,Weight,BMI,HospitalSurvival,ICUSurvival,Survival,HospitalAdmissionTime,HospitalDischargeTime,Hospital_length_days, ICUAdmissionTime, ICUDischargeTime, ICU_length_days, InclusionDate, additional_rows)) %>% 
+  select(c(StudyID,PatientID,Study,Gender,Age,Length,Weight,BMI,HospitalSurvival,ICUSurvival,Survival,HospitalAdmissionTime,HospitalDischargeTime,Hospital_length_days, ICUAdmissionTime, ICUDischargeTime, ICU_length_days, InclusionDate, additional_rows, day)) %>% 
   group_by(PatientID) %>%
-  summarize(across(c(StudyID,Study,Gender,Age,Length,Weight,BMI,HospitalSurvival,ICUSurvival,Survival,HospitalAdmissionTime,HospitalDischargeTime,Hospital_length_days, ICUAdmissionTime, ICUDischargeTime, ICU_length_days, InclusionDate, additional_rows), first)) %>%
+  summarize(across(c(StudyID,Study,Gender,Age,Length,Weight,BMI,HospitalSurvival,ICUSurvival,Survival,HospitalAdmissionTime,HospitalDischargeTime,Hospital_length_days, ICUAdmissionTime, ICUDischargeTime, ICU_length_days, InclusionDate, additional_rows), first),
+            last_cytokine_day=max(day)) %>%
   filter(additional_rows > 0) %>% #not adding any rows for people who have enough records
   uncount(additional_rows) %>% #duplication
   group_by(PatientID)%>%
-  mutate(day = ifelse(PatientID %in% patients_no_cytokines, row_number()+1, row_number()+7)) #patients without cytokines have max d=1, other have max d=7
+  mutate(day = ifelse(PatientID %in% patients_no_cytokines, row_number()+1, row_number()+last_cytokine_day)) #patients without cytokines have max d=1, other have max d=7
 
 baki_i <- bind_rows(baki_i, df_new)
 
@@ -280,6 +285,7 @@ calculate_sofa_and_aki_baki <- function(data){
   dobus <- c()
   norepis <- c()
   epis <- c()
+  milris <- c()
   cardio_sofas <- c()
   GCSs <- c()
   CNS_sofas <- c()
@@ -323,6 +329,7 @@ calculate_sofa_and_aki_baki <- function(data){
       dobus <- append(dobus,NA)
       norepis <- append(norepis,NA)
       epis <- append(epis,NA)
+      milris <- append(milris, NA)
       cardio_sofas <- append(cardio_sofas,NA)
       GCSs <- append(GCSs,NA)
       CNS_sofas <- append(CNS_sofas,NA)
@@ -364,7 +371,7 @@ calculate_sofa_and_aki_baki <- function(data){
     
     pfs <- append(pfs,pf)
     
-    respi_sofa <- ifelse(is.na(pf), 0, 
+    respi_sofa <- ifelse(is.na(pf), NA, 
                          ifelse(pf > 400, 0,
                                 ifelse(pf <= 400 & pf > 300, 1,
                                        ifelse(pf <= 300 & pf > 200, 2,
@@ -413,7 +420,9 @@ calculate_sofa_and_aki_baki <- function(data){
       norepi <- ifelse(is.na(norepi), 0, norepi)
       epi <- mean(filter(Baki_VasoPres, Type == "Epi" & PatientID == patientid & ObsDate <= time_sup & ObsDate >= time_inf)$AvgRes, na.rm=T)
       epi <- ifelse(is.na(epi), 0, epi)
-      vaso_data <- c(SAPm, dopamine, dobu, norepi, epi)
+      milri <-  mean(filter(Baki_VasoPres, Type == "Milri" & PatientID == patientid & ObsDate <= time_sup & ObsDate >= time_inf)$AvgRes, na.rm=T)
+      milri <- ifelse(is.na(milri), 0, milri)
+      vaso_data <- c(SAPm, dopamine, dobu, norepi, epi, milri)
       return(vaso_data)
     }
     vaso <- calculate_vaso_data()
@@ -422,15 +431,17 @@ calculate_sofa_and_aki_baki <- function(data){
     dobus <- append(dobus, vaso[3])
     norepis <- append(norepis, vaso[4])
     epis <- append(epis, vaso[5])
+    milris <- append(milris, vaso[6])
     
     cardio_sofa <- case_when(
-      vaso[1]>=70 ~ 0,
-      vaso[1] < 70 & (vaso[2] > 15 | vaso[5] > 0.1 | vaso[4] > 0.1) ~ 4,
-      vaso[1] < 70 & (vaso[2] > 5 | (vaso[5] <= 0.1 & vaso[5]>0) | (vaso[4] <= 0.1 & vaso[4]>0)) ~ 3,
-      vaso[1] < 70 & ((vaso[2] <= 5 & vaso[2]>0) | vaso[3]>0) ~ 2,
+      vaso[2] > 15 | vaso[5] > 0.1 | vaso[4] > 0.1 ~ 4, 
+      vaso[2] > 5 | (vaso[5] <= 0.1 & vaso[5]>0) | (vaso[4] <= 0.1 & vaso[4]>0) ~ 3,
+      (vaso[2] <= 5 & vaso[2]>0) | vaso[3]>0 ~ 2,
       vaso[1]< 70 ~ 1,
+      vaso[1]>=70 ~ 0,
       TRUE ~ NA
     )
+
     
     cardio_sofas <- append(cardio_sofas,cardio_sofa)
     
@@ -476,9 +487,9 @@ calculate_sofa_and_aki_baki <- function(data){
     ##s_creat
     creat_max <- max(filter(Baki_Lab, VariableAbbr == "Creatinine-s" & PatientID == patientid & SampleTime <= time_sup & SampleTime >= time_inf)$LabValue, na.rm=T)
     AKI_stage_creat <- case_when(
-      creat_max == -Inf ~ last(aki_stages, na.rm=T),
+      creat_max == -Inf ~ data.table::last(aki_stages, na.rm=T),
       creat_max >= 3*CreatBasis | creat_max >= 4 ~ aki_stages[3],
-      is.na(CreatBasis) == T ~ last(aki_stages, na.rm=T),
+      is.na(CreatBasis) == T ~ data.table::last(aki_stages, na.rm=T),
       creat_max >= 2*CreatBasis & creat_max < 3*CreatBasis ~ aki_stages[2],
       creat_max >= 1.5*CreatBasis & creat_max < 2*CreatBasis ~ aki_stages[1],
       TRUE ~ aki_stages[4]
@@ -488,9 +499,9 @@ calculate_sofa_and_aki_baki <- function(data){
     ##change in creat
     creat_change <- max(filter(data_creat, PatientID == patientid & SampleTime <= time_sup & SampleTime >= time_inf)$max_creatinine_increase_previous_48, na.rm=T)
     AKI_stage_creat_change <- case_when(
-      creat_change == -Inf ~ last(aki_stages, na.rm=T),
+      creat_change == -Inf ~ data.table::last(aki_stages, na.rm=T),
       creat_change >= 0.3 ~ aki_stages[1],
-      is.na(creat_change) == T ~ last(aki_stages, na.rm=T),
+      is.na(creat_change) == T ~ data.table::last(aki_stages, na.rm=T),
       creat_change < 0.3 ~ aki_stages[4],
       TRUE ~ last(aki_stages))
     
@@ -501,7 +512,7 @@ calculate_sofa_and_aki_baki <- function(data){
     
     #additional measures for sepsis
     #need of vasopressor?
-    if (any(vaso[2:5]>0)){
+    if (any(vaso[2:6]>0)){
       vasopress <- T
     } else{
       vasopress <- F
@@ -515,17 +526,17 @@ calculate_sofa_and_aki_baki <- function(data){
     #LDH levels?
     LDH <- max(filter(Baki_Lab,(VariableAbbr == "LDH-s") & PatientID == patientid & SampleTime <= time_sup & SampleTime >= time_inf)$LabValue, na.rm=T)
     LDHs_max <- append(LDHs_max,LDH)
-    
+
     
     #antibiotics for infection?
     if (nrow(filter(Baki_Medication, GenericName %in% antibiotics_list & PatientID == patientid & GivenAt <= time_sup & GivenAt >= time_inf))>0) { #if antibiotic has been given
       OrderNumbers <- filter(Baki_Medication, GenericName %in% antibiotics_list & PatientID == patientid & GivenAt <= time_sup & GivenAt >= time_inf)$OrderNumber #check order id
       barids <- filter(Baki_Orders_MedBars, ordernumber %in% OrderNumbers)$barid
       infectionids <- filter(Baki_InfLinks, barid %in% barids)$infectionid
-      focuses <- filter(Baki_Infections, infectionid %in% infectionids)$infectionfocus
+      focuses <- filter(Baki_Infections, infectionid %in% infectionids)$infectionfocuskey
       
       #if all focuses are with the word "profylax..." then it's not infection
-      if (all(grepl("Profylax", focuses)) == TRUE){ #returns TRUE if all focuses have the word profylax
+      if (all(grepl("PROFYLAXIS", focuses)) == TRUE){ #returns TRUE if all focuses have the word profylax
         antibiotic <- FALSE
       } 
       else {
@@ -542,7 +553,7 @@ calculate_sofa_and_aki_baki <- function(data){
   additional_data <- data.frame(mean_pf = pfs, respi_sofa = respi_sofas,
                                 mean_thrombo = thrombos, coagu_sofa = coagu_sofas,
                                 mean_bili = bilis, max_bili = bilis_max, liver_sofa = liver_sofas,
-                                mean_SAPm = SAPms, mean_dopamine = dopamines, mean_dobu = dobus, mean_norepi = norepis, mean_epi = epis, cardio_sofa = cardio_sofas,
+                                mean_SAPm = SAPms, mean_dopamine = dopamines, mean_dobu = dobus, mean_norepi = norepis, mean_epi = epis, mean_milri = milris, cardio_sofa = cardio_sofas,
                                 mean_GCS = GCSs, CNS_sofa = CNS_sofas,
                                 mean_creat = creats, renal_sofa = renal_sofas,
                                 vasopress = vasopresses,
@@ -563,9 +574,25 @@ calculate_sofa_and_aki_baki <- function(data){
   return(bind_cols(data,additional_data))
 }
 
-baki_a_and_i <- calculate_sofa_and_aki_baki(baki_a_and_i)
+baki_a_and_i <- baki_a_and_i %>%
+  filter(Study == "BAKI-I" & StudyID %in% Baki_Cytokines$StudyID)
+
+
+baki_a_and_i_temp <- calculate_sofa_and_aki_baki(baki_a_and_i)
+baki_a_and_i <- baki_a_and_i_temp
+
+#Patient 38522 is an edge-case for which AKI on day 1 can't be automatically computed because of the way time_inf and time_sup are defined
+#For the demographic table, AKI on day 1 can still be calculated manually. The patient arrived at 5pm and the first AKI diagnosis can be given at 8pm.
+#This diagnosis is "No AKI" based on urinary flow and creatinine relative to baseline.
+baki_a_and_i[baki_a_and_i$PatientID==38522 & baki_a_and_i$day==1,]$AKI <- as.factor("No AKI")
+
 
 # Impute missing SOFAs and missing lactate
+baki_a_and_i <- baki_a_and_i %>%
+  ungroup() %>%
+  group_by(PatientID) %>%
+  arrange(day, .by_group = T)
+
 baki_a_and_i[baki_a_and_i==-Inf] <- NA
 data <- baki_a_and_i
 to_be_imputed <- c("cardio_sofa", "renal_sofa",
